@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:focusable="true"
+        android:padding="12dp"
+        android:text="@string/game_loading"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <com.blindindiantech.blindcarrom.GameView
+        android:id="@+id/gameView"
+        android:layout_width="match_parent"
+        android:layout_height="260dp" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="8dp">
+
+            <Button
+                android:id="@+id/btnStrikerLeft"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_striker_left" />
+
+            <Button
+                android:id="@+id/btnStrikerRight"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_striker_right" />
+
+            <Button
+                android:id="@+id/btnAimLeft"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_aim_left" />
+
+            <Button
+                android:id="@+id/btnAimRight"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_aim_right" />
+
+            <Button
+                android:id="@+id/btnPowerUp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_power_up" />
+
+            <Button
+                android:id="@+id/btnPowerDown"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_power_down" />
+
+            <Button
+                android:id="@+id/btnInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_info" />
+
+            <Button
+                android:id="@+id/btnShoot"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_shoot" />
+
+            <Button
+                android:id="@+id/btnScore"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_score" />
+
+            <Button
+                android:id="@+id/btnExit"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:minHeight="60dp"
+                android:text="@string/btn_exit" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>
