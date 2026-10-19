@@ -1,0 +1,12 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+node_modules/
+server/node_modules/
+firebase-key.json
+server/firebase-key.json
+*-adminsdk-*.json
