@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blind Hub (Windows और ब्राउज़र)</title>
+<style>
+  body { font-family: system-ui, sans-serif; font-size: 20px; margin: 0; padding: 24px; background: #fff; color: #111; }
+  h1 { font-size: 28px; }
+  button { display: block; width: 100%; min-height: 56px; margin: 10px 0; font-size: 20px; }
+  button:focus, a:focus { outline: 4px solid #0a5cff; outline-offset: 2px; }
+  #status { margin: 16px 0; font-size: 20px; }
+  .hidden { display: none; }
+  .hint { color: #333; font-size: 16px; }
+</style>
+</head>
+<body>
+<main id="app" role="main">
+  <h1 id="title" tabindex="-1">Blind Hub</h1>
+  <p class="hint">कीबोर्ड: Tab से बटन पर जाइए, Enter दबाइए. खेल में: G गैस, B ब्रेक, U नाक ऊपर, D नाक नीचे, S स्थिति, Esc वापस.</p>
+
+  <section id="menu" aria-labelledby="title">
+    <button id="btnRoad">पहाड़ी सफ़र: SL Road (खेलें)</button>
+    <button id="btnAbout">जानकारी</button>
+  </section>
+
+  <section id="road" class="hidden" aria-labelledby="title">
+    <div id="status" role="status" aria-live="polite"></div>
+    <button id="bGas">गैस चालू करें</button>
+    <button id="bBrake">ब्रेक लगाएँ</button>
+    <button id="bUp">नाक ऊपर करें</button>
+    <button id="bDown">नाक नीचे करें</button>
+    <button id="bSay">स्थिति सुनें</button>
+    <button id="bBack">मेनू पर वापस</button>
+  </section>
+
+  <section id="about" class="hidden" aria-labelledby="title">
+    <p>Blind Indian Tech Support की स्वयंसेवी पहल. यह संस्करण Windows और ब्राउज़र पर चलता है, बिना इंस्टॉल के.</p>
+    <p>संपर्क: bits.headquarter505@gmail.com</p>
+    <button id="bAboutBack">मेनू पर वापस</button>
+  </section>
+</main>
+
+<script>
+(function () {
+  // ---------- बोलना ----------
+  var hi = (navigator.language || '').indexOf('hi') === 0;
+  function say(text) {
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    var u = new SpeechSynthesisUtterance(text);
+    u.lang = hi ? 'hi-IN' : 'en-IN';
+    speechSynthesis.speak(u);
+    var st = document.getElementById('status');
+    if (st) st.textContent = text;
+  }
+  function tr(h, e) { return hi ? h : e; }
+
+  // ---------- स्क्रीन बदलना ----------
+  var screens = ['menu', 'road', 'about'];
+  function show(name) {
+    screens.forEach(function (s) { document.getElementById(s).classList.toggle('hidden', s !== name); });
+    var t = document.getElementById('title');
+    t.textContent = name === 'road' ? tr('पहाड़ी सफ़र: SL Road', 'Hill trail: SL Road') : 'Blind Hub';
+    setTimeout(function () { t.focus(); }, 50);
+  }
+
+  // ---------- खेल: SL Road (लैपटॉप वाले नियम, Android के स्तर 1 जैसे) ----------
+  var MAX = 180, BRIDGE = 1200, SIGNAL = 1600, SUMMIT = 1800, ROAD = 2000;
+  var g = null, timer = null, last = 0;
+  function newRun() {
+    return { pos: 0, kmh: 0, gas: false, brake: false, tilt: 0, fuel: 100, coins: 0, gems: 0, damage: 0,
+             lastMeter: 0, fuelDone: {}, bridgeDone: false, bridgeMax: 0, signalMin: -1, signalDone: false,
+             done: false, nextSnake: SUMMIT + 60, snakeAt: 0, snakesAvoided: 0 };
+  }
+  function slope() { return g.pos >= SUMMIT ? 1 : 0; }
+  function crash(msg) { g.damage++; g.kmh = 0; g.tilt = 0; g.pos = Math.max(0, g.pos - 100); say(msg); }
+  function step(dt) {
+    if (g.gas && g.fuel > 0) g.kmh += (30 * (1 - g.kmh / MAX) + 4) * dt;
+    if (g.brake) g.kmh -= 60 * dt;
+    g.kmh -= (slope() * 14 + 2 + g.kmh / MAX * 12) * dt;
+    g.kmh = Math.min(MAX, Math.max(0, g.kmh));
+    if (g.kmh > 0) g.fuel = Math.max(0, g.fuel - g.kmh * 0.004 * dt);
+    g.pos += g.kmh / 3.6 * dt;
+    g.tilt += (slope() * 25 + (Math.random() - 0.5) * 10) * dt;
+    if (Math.abs(g.tilt) >= 100) { crash(tr('गाड़ी संतुलन खोकर पलट गई', 'The truck flipped')); return; }
+    var m = Math.floor(g.pos);
+    while (g.lastMeter < m) { g.lastMeter++; g.coins++; }
+    var fs = Math.floor(g.pos / 200);
+    if (fs > 0 && !g.fuelDone[fs]) { g.fuelDone[fs] = true; g.fuel = Math.min(100, g.fuel + 30); say(tr('ईंधन भरा', 'Fuel filled')); }
+    if (g.pos >= g.nextSnake && !g.snakeAt) { g.snakeAt = performance.now() + 6000; say(tr('सामने सांप! गति 40 से नीचे कीजिए', 'Snake ahead! Slow below 40')); }
+    if (g.snakeAt && performance.now() >= g.snakeAt) {
+      g.snakeAt = 0; g.nextSnake = g.pos + 80 + Math.random() * 60;
+      if (g.kmh <= 40) { g.snakesAvoided++; say(tr('सांप से बचे', 'Avoided the snake')); }
+      else { g.damage++; g.kmh *= 0.5; say(tr('सांप ने डस लिया!', 'The snake bit!')); }
+    }
+    if (!g.bridgeDone && g.pos >= BRIDGE && g.pos <= BRIDGE + 40) g.bridgeMax = Math.max(g.bridgeMax, g.kmh);
+    if (!g.bridgeDone && g.pos > BRIDGE + 40) {
+      g.bridgeDone = true;
+      if (g.bridgeMax > 20) say(tr('पुल तेज़ गति से टूट गया! आप आगे निकल चुके हैं', 'The bridge collapsed under your speed! You are ahead.'));
+      else { g.coins += 50; say(tr('पुल धीमे पार हुआ, पचास बोनस सिक्के', 'Crossed the bridge slowly, fifty bonus coins')); }
+    }
+    if (!g.signalDone) {
+      if (g.pos >= SIGNAL - 10 && g.pos <= SIGNAL + 10) g.signalMin = g.signalMin < 0 ? g.kmh : Math.min(g.signalMin, g.kmh);
+      if (g.pos > SIGNAL + 10) {
+        g.signalDone = true;
+        if (g.signalMin >= 0 && g.signalMin <= 15) { g.gems += 3; g.fuel = Math.min(100, g.fuel + 15); say(tr('सिग्नल पर सही ब्रेक, तीन रत्न', 'Good braking at the signal, three gems')); }
+        else say(tr('सिग्नल पर सही ब्रेक नहीं, रत्न नहीं मिले', 'No good braking at the signal, no gems'));
+      }
+    }
+    if (g.pos >= ROAD) { g.done = true; g.pos = ROAD; g.kmh = 0; say(tr('फ़िनिश! सिक्के ' + g.coins + ', रत्न ' + g.gems + ', नुकसान ' + g.damage, 'Finish! Coins ' + g.coins + ', gems ' + g.gems + ', damage ' + g.damage)); }
+  }
+  function tick() {
+    var now = performance.now(), dt = Math.min(0.2, (now - last) / 1000); last = now;
+    if (g && !g.done) step(dt);
+    if (g && !g.done) timer = setTimeout(tick, 100); else timer = null;
+  }
+  function statusLine() {
+    var bal = g.tilt > 30 ? tr('नाक नीचे', 'nose down') : g.tilt < -30 ? tr('नाक ऊपर', 'nose up') : tr('संतुलन ठीक', 'balanced');
+    return tr('दूरी ' + Math.floor(g.pos) + ' मीटर, गति ' + Math.floor(g.kmh) + ' किमी प्रति घंटा, ईंधन ' + Math.floor(g.fuel) + ' प्रतिशत, ' + bal + ', सिक्के ' + g.coins + ', रत्न ' + g.gems + ', नुकसान ' + g.damage,
+              'Distance ' + Math.floor(g.pos) + ' m, speed ' + Math.floor(g.kmh) + ' km/h, fuel ' + Math.floor(g.fuel) + ' percent, ' + bal + ', coins ' + g.coins + ', gems ' + g.gems + ', damage ' + g.damage);
+  }
+  function startRoad() {
+    g = newRun(); last = performance.now();
+    document.getElementById('bGas').textContent = tr('गैस चालू करें', 'Gas on');
+    document.getElementById('bBrake').textContent = tr('ब्रेक लगाएँ', 'Apply brake');
+    show('road');
+    say(tr('आप SL Road पर शक्तिशाली ट्रक चला रहे हैं. गैस और ब्रेक बटन से चलाइए. पुल पर बीस किमी प्रति घंटा से धीमे चलिए.', 'You are on SL Road in the truck. Use gas and brake. Stay below 20 km/h on the bridge.'));
+    clearTimeout(timer); tick();
+  }
+  function toggleGas() { if (!g) return; g.gas = !g.gas; document.getElementById('bGas').textContent = g.gas ? tr('गैस बंद करें', 'Gas off') : tr('गैस चालू करें', 'Gas on'); say(g.gas ? tr('गैस चालू', 'Gas on') : tr('गैस बंद', 'Gas off')); }
+  function toggleBrake() { if (!g) return; g.brake = !g.brake; document.getElementById('bBrake').textContent = g.brake ? tr('ब्रेक छोड़ें', 'Release brake') : tr('ब्रेक लगाएँ', 'Apply brake'); say(g.brake ? tr('ब्रेक लगा', 'Brake on') : tr('ब्रेक छूटा', 'Brake released')); }
+  function nose(d) { if (!g) return; g.tilt += d; say(d < 0 ? tr('नाक ऊपर', 'Nose up') : tr('नाक नीचे', 'Nose down')); }
+  function backToMenu() { if (timer) clearTimeout(timer); timer = null; g = null; show('menu'); say(tr('मुख्य मेनू', 'Main menu')); }
+
+  // ---------- बटन और कीबोर्ड ----------
+  document.getElementById('btnRoad').onclick = startRoad;
+  document.getElementById('btnAbout').onclick = function () { show('about'); say(tr('जानकारी', 'About')); };
+  document.getElementById('bAboutBack').onclick = function () { show('menu'); };
+  document.getElementById('bGas').onclick = toggleGas;
+  document.getElementById('bBrake').onclick = toggleBrake;
+  document.getElementById('bUp').onclick = function () { nose(-20); };
+  document.getElementById('bDown').onclick = function () { nose(20); };
+  document.getElementById('bSay').onclick = function () { if (g) say(statusLine()); };
+  document.getElementById('bBack').onclick = backToMenu;
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { if (g) backToMenu(); return; }
+    if (!g || document.getElementById('road').classList.contains('hidden')) return;
+    var k = e.key.toLowerCase();
+    if (k === 'g') toggleGas();
+    else if (k === 'b') toggleBrake();
+    else if (k === 'u') nose(-20);
+    else if (k === 'd') nose(20);
+    else if (k === 's') say(statusLine());
+  });
+  show('menu');
+  say(tr('Blind Hub में आपका स्वागत है. पहाड़ी सफ़र खेलने के लिए पहला बटन चुनिए.', 'Welcome to Blind Hub. Choose the first button to play the hill trail.'));
+})();
+</script>
+</body>
+</html>
