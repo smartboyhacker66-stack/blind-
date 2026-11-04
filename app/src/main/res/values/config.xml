@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Render सर्विस का पता. स्क्रीनशॉट में "1" और "l" में भ्रम था, इसलिए दोनों रूप रखे हैं.
+         ऐप जो चल जाए उसे याद रख लेता है. पक्का होने पर एक ही रखना है. -->
+    <string-array name="server_urls" translatable="false">
+        <item>https://blind-b81m.onrender.com</item>
+        <item>https://blind-b8lm.onrender.com</item>
+    </string-array>
+</resources>
