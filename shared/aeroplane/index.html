@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aeroplane Simulator</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; padding: 16px; background: #101418; color: #f2f5f7; font: 18px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  #status { margin: 8px 0 12px; padding: 10px; border: 1px solid #4a5560; border-radius: 8px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+  button { min-height: 60px; font-size: 18px; border-radius: 8px; border: 2px solid #6b7a88; background: #1c242c; color: #f2f5f7; }
+  button:focus-visible { outline: 3px solid #ffd54a; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<h1 id="title" tabindex="-1">Aeroplane Simulator</h1>
+<div id="status" tabindex="0"></div>
+<div id="controls" class="grid"></div>
+<div id="live" class="sr-only" aria-live="assertive" role="status"></div>
+<script src="aero.js"></script>
+</body>
+</html>
