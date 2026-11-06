@@ -1,0 +1,59 @@
+{
+  "name": "blind-hub",
+  "version": "2.0.0",
+  "description": "Blind Hub: audio games for blind players (Windows)",
+  "author": "Blind Indian Tech Support",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "sync": "node scripts/sync-assets.js",
+    "start": "node scripts/sync-assets.js && electron .",
+    "dist": "node scripts/sync-assets.js && electron-builder --win --publish never"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "com.blindindiantech.blindcarrom",
+    "productName": "Blind Hub",
+    "copyright": "Copyright © Blind Indian Tech Support 2026",
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "artifactName": "BlindHub-${version}-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "BlindHub-${version}-Portable.${ext}"
+    }
+  }
+}

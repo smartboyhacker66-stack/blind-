@@ -1,0 +1,119 @@
+name: Build and release Blind Hub (Android APK + Windows installer)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # v1.2.3 tags give 1.2.3; other builds give 2.0.<run number>
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v2.0.{0}', github.run_number) }}
+
+jobs:
+  verify:
+    name: Verify (syntax, route maps, Titanic story, server tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install server dependencies
+        run: |
+          if [ -f server/package-lock.json ]; then npm ci --prefix server; else npm install --prefix server; fi
+      - name: Run checks
+        run: node scripts/ci/verify.js
+
+  android:
+    name: Android APK
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build APK (signed release when keystore secrets exist, otherwise debug)
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p dist
+          if [ -n "$KS_B64" ]; then
+            gradle assembleRelease --stacktrace
+            BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            "$BT/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/aligned.apk"
+            "$BT/apksigner" sign --ks "$RUNNER_TEMP/release.jks" --ks-pass env:KS_PASS --key-alias "$KS_ALIAS" --key-pass env:KEY_PASS --out "dist/BlindHub-$VERSION.apk" "$RUNNER_TEMP/aligned.apk"
+          else
+            gradle assembleDebug --stacktrace
+            cp app/build/outputs/apk/debug/app-debug.apk "dist/BlindHub-$VERSION-debug.apk"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlindHub-android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  windows:
+    name: Windows installer
+    needs: verify
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: electron
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Build installer and portable exe
+        run: npm run dist -- -c.extraMetadata.version="${VERSION#v}"
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlindHub-windows-exe
+          path: electron/dist/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish downloads
+    needs: [android, windows]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - name: Checksums
+        run: cd out && find . -type f \( -name '*.apk' -o -name '*.exe' \) -exec sha256sum {} + | sed 's#\./[^/]*/##' > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: Blind Hub ${{ env.VERSION }}
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            out/BlindHub-android-apk/*.apk
+            out/BlindHub-windows-exe/*.exe
+            out/SHA256SUMS.txt
