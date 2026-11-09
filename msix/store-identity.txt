@@ -1,0 +1,5 @@
+# Copy these three values from Partner Center: Product management > Product identity.
+# Edit them here, save, then run push_to_github.bat. No secrets: these are public values.
+IDENTITY_NAME=BlindIndianTech.BlindHub
+PUBLISHER=CN=Blind Indian Tech Support
+PUBLISHER_DISPLAY_NAME=Blind Indian Tech Support

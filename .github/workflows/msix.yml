@@ -1,0 +1,67 @@
+name: Build Blind Hub MSIX (Microsoft Store)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install and prepare the app files (game code untouched)
+        working-directory: electron
+        run: |
+          npm install
+          npm run sync
+          npx electron-builder --win --dir --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Stage the MSIX layout
+        shell: pwsh
+        run: |
+          $cfg = @{}
+          Get-Content msix/store-identity.txt | Where-Object { $_ -match '^[A-Z_]+=' } | ForEach-Object {
+            $k, $v = $_ -split '=', 2; $cfg[$k.Trim()] = $v.Trim()
+          }
+          foreach ($k in 'IDENTITY_NAME','PUBLISHER','PUBLISHER_DISPLAY_NAME') {
+            if (-not $cfg[$k]) { throw "Missing $k in msix/store-identity.txt" }
+          }
+          $pkg = Get-Content electron/package.json -Raw | ConvertFrom-Json
+          $parts = $pkg.version.Split('.')
+          # Store rule: the last part of the version must stay 0.
+          $version = "$($parts[0]).$($parts[1]).${{ github.run_number }}.0"
+          Write-Host "MSIX version $version"
+
+          $unpacked = Get-ChildItem electron/dist -Directory | Where-Object { $_.Name -like 'win*unpacked' } | Select-Object -First 1
+          if (-not $unpacked) { throw 'electron-builder did not produce a win-unpacked folder.' }
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item $unpacked.FullName stage/app -Recurse
+          Copy-Item msix/Assets stage/Assets -Recurse
+          if (-not (Test-Path 'stage/app/Blind Hub.exe')) { throw 'Blind Hub.exe not found in the app folder.' }
+
+          $m = Get-Content msix/AppxManifest.template.xml -Raw
+          $m = $m.Replace('@IDENTITY_NAME@', $cfg['IDENTITY_NAME']).Replace('@PUBLISHER@', $cfg['PUBLISHER']).Replace('@PUBLISHER_DISPLAY_NAME@', $cfg['PUBLISHER_DISPLAY_NAME']).Replace('@VERSION@', $version)
+          [System.IO.File]::WriteAllText("$PWD/stage/AppxManifest.xml", $m, (New-Object System.Text.UTF8Encoding($false)))
+
+      - name: Pack the MSIX
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter makeappx.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $tool) { throw 'makeappx.exe not found on the runner.' }
+          New-Item -ItemType Directory -Force out | Out-Null
+          & $tool.FullName pack /d stage /p out/BlindHub.msix /o
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx failed.' }
+          Get-Item out/BlindHub.msix | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BlindHub-msix
+          path: out/BlindHub.msix
