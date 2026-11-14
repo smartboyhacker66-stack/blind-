@@ -1,0 +1,144 @@
+'use strict';
+// खाते और लॉगिन-पर्चियाँ रखने की जगह. FIREBASE_KEY मिले तो Firestore, वरना मेमोरी (टेस्ट के लिए).
+
+const MAX_NOTIFS = 100;
+const START_BALANCE = 20000;
+const balOf = (u) => (u && typeof u.balance === 'number' ? u.balance : START_BALANCE);
+
+class MemoryStore {
+  constructor() {
+    this.users = new Map(); this.sessions = new Map(); this.kind = 'memory';
+    this.notifs = []; this.settings = new Map();
+  }
+  async countUsers() { return this.users.size; }
+  async deleteUser(id) {
+    this.users.delete(id);
+    for (const [k, v] of Array.from(this.sessions.entries())) if (v.id === id) this.sessions.delete(k);
+  }
+  async getSetting(k) { return this.settings.has(k) ? this.settings.get(k) : null; }
+  async setSetting(k, v) { if (v === null) this.settings.delete(k); else this.settings.set(k, v); }
+  async listNotifications(limit = MAX_NOTIFS) { return this.notifs.slice(0, limit).map((n) => ({ ...n })); }
+  async addNotification(text) {
+    const n = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text, at: Date.now() };
+    this.notifs.unshift(n);
+    this.notifs.length = Math.min(this.notifs.length, MAX_NOTIFS);
+    return n;
+  }
+  async clearNotifications() { const c = this.notifs.length; this.notifs = []; return c; }
+  async getUser(id) { return this.users.get(id) || null; }
+  async getUserByName(lower) { for (const u of this.users.values()) if (u.nameLower === lower) return { ...u }; return null; }
+  async deleteSessionsOf(id) { for (const [k, v] of Array.from(this.sessions.entries())) if (v.id === id) this.sessions.delete(k); }
+  async pushInbox(id, text) {
+    const u = this.users.get(id); if (!u) return false;
+    u.inbox = [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, at: Date.now() }, ...(u.inbox || [])].slice(0, 20); return true;
+  }
+  async putUser(u) { this.users.set(u.id, { ...u }); }
+  async updateUser(id, patch) { const u = this.users.get(id); if (u) Object.assign(u, patch); }
+  // बैलेंस: delta जोड़ता/घटाता है (0 से नीचे नहीं), set तय करता है. नया बैलेंस लौटाता है, खाता न हो तो null.
+  async getBalance(id) { const u = this.users.get(id); return u ? balOf(u) : null; }
+  async adjustBalance(id, delta) { const u = this.users.get(id); if (!u) return null; u.balance = Math.max(0, balOf(u) + delta); return u.balance; }
+  async setBalance(id, v) { const u = this.users.get(id); if (!u) return null; u.balance = Math.max(0, v); return u.balance; }
+  async getSession(key) { return this.sessions.get(key) || null; }
+  async putSession(key, s) { this.sessions.set(key, { ...s }); }
+  async deleteSession(key) { this.sessions.delete(key); }
+}
+
+class FirestoreStore {
+  constructor(db) { this.db = db; this.kind = 'firestore'; }
+  async countUsers() { const r = await this.db.collection('users').count().get(); return r.data().count; }
+  async deleteUser(id) {
+    await this.db.collection('users').doc(id).delete();
+    const q = await this.db.collection('sessions').where('id', '==', id).get();
+    const b = this.db.batch();
+    q.docs.forEach((d) => b.delete(d.ref));
+    await b.commit();
+  }
+  async getSetting(k) { const d = await this.db.collection('settings').doc(k).get(); return d.exists ? d.data().value : null; }
+  async setSetting(k, v) {
+    if (v === null) await this.db.collection('settings').doc(k).delete();
+    else await this.db.collection('settings').doc(k).set({ value: v });
+  }
+  async listNotifications(limit = MAX_NOTIFS) {
+    const q = await this.db.collection('notifications').orderBy('at', 'desc').limit(limit).get();
+    return q.docs.map((d) => d.data());
+  }
+  async addNotification(text) {
+    const n = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, text, at: Date.now() };
+    await this.db.collection('notifications').doc(n.id).set(n);
+    // 100 से पुरानी हटाना
+    const old = await this.db.collection('notifications').orderBy('at', 'desc').offset(MAX_NOTIFS).get();
+    for (const d of old.docs) await d.ref.delete();
+    return n;
+  }
+  async clearNotifications() {
+    let total = 0;
+    for (;;) {
+      const q = await this.db.collection('notifications').limit(300).get();
+      if (q.empty) break;
+      const batch = this.db.batch();
+      q.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      total += q.size;
+    }
+    return total;
+  }
+  async getUser(id) { const d = await this.db.collection('users').doc(id).get(); return d.exists ? d.data() : null; }
+  async deleteSessionsOf(id) {
+    const q = await this.db.collection('sessions').where('id', '==', id).get();
+    const b = this.db.batch(); q.docs.forEach((d) => b.delete(d.ref)); await b.commit();
+  }
+  async getUserByName(lower) {
+    const q = await this.db.collection('users').where('nameLower', '==', lower).limit(1).get();
+    return q.empty ? null : q.docs[0].data();
+  }
+  async pushInbox(id, text) {
+    const u = await this.getUser(id); if (!u) return false;
+    const inbox = [{ id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, at: Date.now() }, ...(u.inbox || [])].slice(0, 20);
+    await this.updateUser(id, { inbox }); return true;
+  }
+  async putUser(u) { await this.db.collection('users').doc(u.id).set(u); }
+  async updateUser(id, patch) { await this.db.collection('users').doc(id).set(patch, { merge: true }); }
+  async getBalance(id) { const u = await this.getUser(id); return u ? balOf(u) : null; }
+  async adjustBalance(id, delta) {
+    const ref = this.db.collection('users').doc(id);
+    return this.db.runTransaction(async (t) => {
+      const d = await t.get(ref);
+      if (!d.exists) return null;
+      const nb = Math.max(0, balOf(d.data()) + delta);
+      t.set(ref, { balance: nb }, { merge: true });
+      return nb;
+    });
+  }
+  async setBalance(id, v) {
+    const ref = this.db.collection('users').doc(id);
+    const d = await ref.get();
+    if (!d.exists) return null;
+    const nb = Math.max(0, v);
+    await ref.set({ balance: nb }, { merge: true });
+    return nb;
+  }
+  async getSession(key) { const d = await this.db.collection('sessions').doc(key).get(); return d.exists ? d.data() : null; }
+  async putSession(key, s) { await this.db.collection('sessions').doc(key).set(s); }
+  async deleteSession(key) { await this.db.collection('sessions').doc(key).delete(); }
+}
+
+function createStore(env = process.env) {
+  let raw = env.FIREBASE_KEY;
+  if (!raw) {
+    // Render की "Secret Files" वाला रास्ता भी चलेगा
+    for (const p of ['/etc/secrets/firebase-key.json', './firebase-key.json']) {
+      try { raw = require('fs').readFileSync(p, 'utf8'); break; } catch (e) { /* अगला रास्ता */ }
+    }
+  }
+  if (!raw) return new MemoryStore();
+  try {
+    const admin = require('firebase-admin');
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(raw)) });
+    return new FirestoreStore(admin.firestore());
+  } catch (e) {
+    console.error('Firestore शुरू नहीं हुआ, मेमोरी वाला इस्तेमाल हो रहा है:', e.message);
+    return new MemoryStore();
+  }
+}
+
+module.exports = { createStore, MemoryStore, FirestoreStore, MAX_NOTIFS, START_BALANCE };

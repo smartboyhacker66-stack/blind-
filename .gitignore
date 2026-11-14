@@ -1,0 +1,26 @@
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+.DS_Store
+captures/
+node_modules/
+server/node_modules/
+firebase-key.json
+server/firebase-key.json
+*-adminsdk-*.json
+electron/node_modules/
+electron/dist/
+electron/assets/
+upload.jks
+keystore_base64.txt
+keystore_info.txt
+*.jks
+
+# गुप्त फ़ाइलें: कभी GitHub पर नहीं
+upload.jks
+keystore_base64.txt
+keystore_info.txt
+*.jks
+*.keystore
