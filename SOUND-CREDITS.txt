@@ -1,0 +1,7 @@
+Blind Hub: sound sources and licences
+=====================================
+1) Files made by code (synthetic) by Claude for this project: coin hits, pockets, UI sounds, train engine/clack/horn/whistle/bell/door/brake/points/signal/crowd/rush and others. No third-party source.
+2) Mixkit: "Old train departure" (mixkit-old-train-departure-1628.wav). Used only as source material for train_rumble, train_depart, train_pass and train_joint1..3 (cut, looped and re-pitched).
+   Source page: (add the Mixkit page link here)
+   Licence: Mixkit Sound Effects Free License (check the licence page when you publish).
+3) Own recordings: (add each file name, who recorded it and when)

@@ -1,0 +1,401 @@
+'use strict';
+// टेलीग्राम बॉट वाला एडमिन पैनल. webhook से चलता है, इसलिए सर्वर सोया हो तो संदेश आते ही जाग जाता है.
+const crypto = require('crypto');
+const auth = require('./auth.js');
+const { START_BALANCE } = require('./store.js');
+const KEYBOARD = { keyboard: [[{ text: 'Allot Money' }, { text: 'Reset Balance' }], [{ text: '/menu' }, { text: '/stats' }]], resize_keyboard: true };
+const MENU_BUTTONS = {
+  inline_keyboard: [
+    [{ text: 'दुकान खोलें', callback_data: 'm_shop_on' }, { text: 'दुकान बंद करें', callback_data: 'm_shop_off' }],
+    [{ text: 'दुकान की स्थिति', callback_data: 'm_shop_status' }, { text: 'आँकड़े', callback_data: 'm_stats' }],
+    [{ text: 'सिक्का बदलना चालू', callback_data: 'm_conv_on' }, { text: 'सिक्का बदलना बंद', callback_data: 'm_conv_off' }],
+    [{ text: 'सूचनाएँ देखें', callback_data: 'm_notifs' }, { text: 'कमांड की सूची', callback_data: 'm_help' }],
+  ],
+};
+const MENU_CMDS = { m_shop_on: '/shop on', m_shop_off: '/shop off', m_shop_status: '/shop status', m_stats: '/stats', m_conv_on: '/convert on', m_conv_off: '/convert off', m_notifs: '/notifs', m_help: '/help' };
+const MAX_ALLOT = 100000000;
+const DOC_LIMIT = 4 * 1024 * 1024;
+
+const HELP = [
+  'एडमिन आदेश:',
+  '/stats : खिलाड़ी, कमरे, मैच और खातों की गिनती',
+  '/notify पाठ : सबको सूचना भेजें',
+  '/notifs : आख़िरी 5 सूचनाएँ',
+  '/clearnotifs : सारी सूचनाएँ मिटाएँ (पुष्टि पूछेगा)',
+  '/ban आईडी : खिलाड़ी को रोकें',
+  '/unban आईडी : खिलाड़ी को वापस खोलें',
+  '/allot आईडी रकम : खिलाड़ी के बैलेंस में रकम जोड़ें (बटन: Allot Money)',
+  '/resetbalance आईडी [रकम] : बैलेंस रीसेट करें, रकम न दें तो 20000 (बटन: Reset Balance)',
+  '/balance आईडी : बैलेंस देखें',
+  '/notifyuser नाम पाठ : किसी एक खिलाड़ी को निजी सूचना भेजें',
+  '/suspend नाम, /unsuspend नाम : खाता रोकें या खोलें (नाम या आईडी)',
+  '/shop on|off|status : दुकान खोलें या बंद करें',
+  '/price आइटम रकम : दुकान में कीमत तय करें (गेम रुपये)',
+  '/promo कोड रकम : प्रोमो कोड बनाएँ (एक खिलाड़ी एक बार)',
+  '/convert on|off|status : सिक्का को गेम रुपये में बदलना चालू या बंद',
+  '/rate N : 1 सिक्का = N गेम रुपये',
+  '/promooff कोड : प्रोमो कोड बंद करें',
+  '/routeadd (टेक्स्ट में रूट), /routes, /routeprice ID रकम, /routeon ID, /routeoff ID',
+  '/release : एडमिन का ताला खोलें',
+].join('\n');
+
+function secretFor(token) { return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 32); }
+
+async function telegramDelete(token, chatId, messageId) {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+  } catch (e) { /* हटाना न हो पाए तो भी आगे बढ़ो */ }
+}
+
+async function telegramSendFile(token, chatId, buf, filename, caption, markup) {
+  const fd = new FormData();
+  if (markup) fd.append('reply_markup', JSON.stringify(markup));
+  fd.append('chat_id', String(chatId));
+  fd.append('caption', String(caption || '').slice(0, 900));
+  fd.append('document', new Blob([buf]), filename);
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: 'POST', body: fd });
+  return res.ok;
+}
+
+async function telegramSend(token, chatId, text, extra) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, ...(extra || {}) }),
+  });
+  return res.ok;
+}
+
+function createAdmin({ store, hub, token, ctl, send, del, passHash, sendFile }) {
+  const out = send || ((chatId, text, extra) => telegramSend(token, chatId, text, extra));
+  const remove = del || ((chatId, messageId) => telegramDelete(token, chatId, messageId));
+  const outFile = sendFile || ((chatId, buf, filename, caption, markup) => telegramSendFile(token, chatId, buf, filename, caption, markup));
+  const pendingOp = new Map();     // चैट -> 'allot' | 'reset' (बटन दबने के बाद अगला संदेश आईडी (और रकम) है)
+  const awaiting = new Map();      // वे चैट जो पासवर्ड भेजने वाली हैं
+  const fails = { n: 0, until: 0 };
+  let adminId;           // undefined = अभी पढ़ा नहीं, null = कोई एडमिन नहीं
+  // एडमिन बनने का एक बार वाला कोड: हर बार सर्वर चालू होने पर नया बनता है और सिर्फ़ Render के लॉग में दिखता है
+  const claimCode = crypto.randomBytes(9).toString('base64url');
+
+  async function getAdmin() {
+    if (adminId === undefined) adminId = await store.getSetting('adminChatId');
+    return adminId;
+  }
+
+  async function notifyAdmin(text) {
+    try { const a = await getAdmin(); if (a) await out(a, text); } catch (e) { /* सूचना न जाए तो खेल न रुके */ }
+  }
+
+  async function toId(raw) {
+    const id = auth.normaliseId(raw);
+    if (auth.isOurId(id)) return id;
+    const u = await store.getUserByName(auth.nameKey(String(raw)));
+    return u ? u.id : id;
+  }
+
+  async function forwardFile(buf, filename, caption, markup) {
+    try { const a = await getAdmin(); if (!a) return false; return !!(await outFile(a, buf, filename, caption, markup)); } catch (e) { return false; }
+  }
+
+  async function sendTo(chatId, text) { try { return !!(await out(chatId, text)); } catch (e) { return false; } }
+
+  async function doAllot(chat, idRaw, amtRaw) {
+    const id = await toId(idRaw);
+    const amt = Number(amtRaw);
+    if (!auth.isOurId(id)) return void (await out(chat, 'यह आईडी या यूज़रनेम नहीं मिला.'));
+    if (!Number.isInteger(amt) || amt <= 0 || amt > MAX_ALLOT) return void (await out(chat, 'रकम 1 से 100000000 के बीच पूरी संख्या होनी चाहिए.'));
+    const rec = await store.getUser(id);
+    if (!rec) return void (await out(chat, 'ऐसा कोई खाता नहीं मिला.'));
+    const nb = await store.adjustBalance(id, amt);
+    await out(chat, `${rec.name} के खाते में ${amt} रुपये जुड़ गए. नया बैलेंस: ${nb}.`, KEYBOARD);
+  }
+
+  async function doReset(chat, idRaw, amtRaw) {
+    const id = await toId(idRaw);
+    const amt = amtRaw === undefined || amtRaw === '' ? START_BALANCE : Number(amtRaw);
+    if (!auth.isOurId(id)) return void (await out(chat, 'यह आईडी या यूज़रनेम नहीं मिला.'));
+    if (!Number.isInteger(amt) || amt < 0 || amt > MAX_ALLOT) return void (await out(chat, 'रकम 0 से 100000000 के बीच पूरी संख्या होनी चाहिए.'));
+    const rec = await store.getUser(id);
+    if (!rec) return void (await out(chat, 'ऐसा कोई खाता नहीं मिला.'));
+    const nb = await store.setBalance(id, amt);
+    await out(chat, `${rec.name} का बैलेंस रीसेट हुआ. नया बैलेंस: ${nb}.`, KEYBOARD);
+  }
+
+  async function handleUpdate(u) {
+    if (u && u.callback_query) return handleCallback(u.callback_query);
+    const m = u && u.message;
+    if (!m || typeof m.text !== 'string' || !m.chat) return;
+    const chat = m.chat.id;
+    const text = m.text.trim();
+    const admin = await getAdmin();
+
+    // खिलाड़ी का Telegram जोड़ना: /link कोड, या ऐप के लिंक से /start link_कोड
+    const lk = /^\/(?:link|start)\s+(?:link_)?([A-Za-z0-9]{6})\s*$/.exec(text);
+    if (lk && ctl && typeof ctl.linkTelegram === 'function') {
+      const nm = await ctl.linkTelegram(lk[1], chat);
+      if (nm) return void (await out(chat, `${nm} का खाता इस Telegram से जुड़ गया. अब पासवर्ड भूलने पर कोड यहीं आएगा.`));
+      if (String(text).startsWith('/link')) return void (await out(chat, 'यह कोड सही नहीं है या समय निकल चुका है. ऐप में दोबारा कोड बनाइए.'));
+    }
+
+    // पासवर्ड वाला तरीक़ा: /start के बाद अगला संदेश पासवर्ड माना जाता है
+    if (!admin && passHash && awaiting.has(String(chat)) && !text.startsWith('/')) {
+      const now = Date.now();
+      if (fails.until > now) {
+        await remove(chat, m.message_id);
+        return void (await out(chat, 'बहुत ग़लत कोशिशें हुईं. कुछ देर बाद फिर कोशिश कीजिए.'));
+      }
+      let good = false;
+      try {
+        const [salt, hash] = String(passHash).split(':');
+        good = auth.verifyPassword(text, salt, hash);
+      } catch (e) { good = false; }
+      await remove(chat, m.message_id);          // पासवर्ड वाला संदेश चैट से हटा दो
+      if (good) {
+        awaiting.delete(String(chat));
+        fails.n = 0;
+        adminId = String(chat);
+        await store.setSetting('adminChatId', adminId);
+        return void (await out(chat, 'सही पासवर्ड. आप इस बॉट के एडमिन बन गए. यह चैट अब ताले में है, और किसी और के संदेश अनदेखे रहेंगे.\n\n' + HELP, KEYBOARD));
+      }
+      fails.n += 1;
+      if (fails.n >= 5) { fails.n = 0; fails.until = now + 10 * 60 * 1000; }
+      return void (await out(chat, 'पासवर्ड ग़लत है.'));
+    }
+
+    if (/^\/start(\s|$)/.test(text)) {
+      const arg = text.slice(6).trim();
+      if (admin) {
+        if (String(admin) === String(chat)) await out(chat, 'आप एडमिन हैं. आदेशों के लिए /help भेजिए.');
+        return;
+      }
+      if (arg === claimCode) {
+        adminId = String(chat);
+        await store.setSetting('adminChatId', adminId);
+        await out(chat, 'आप इस बॉट के एडमिन बन गए. यह चैट अब ताले में है, और किसी और के संदेश अनदेखे रहेंगे.\n\n' + HELP, KEYBOARD);
+      } else if (passHash) {
+        awaiting.set(String(chat), Date.now());
+        await out(chat, 'यह निजी बॉट है. एडमिन बनने के लिए अगले संदेश में एडमिन का पासवर्ड भेजिए.');
+      } else {
+        await out(chat, 'यह निजी बॉट है.');
+      }
+      return;
+    }
+
+    if (!admin || String(admin) !== String(chat)) return;
+
+    // बटन वाला तरीक़ा: पहले बटन, फिर अगले संदेश में आईडी (और रकम)
+    if (text === 'Allot Money') { pendingOp.set(String(chat), 'allot'); return void (await out(chat, 'ऐसे भेजिए: आईडी रकम\nउदाहरण: abcdefghijklmnop 5000', KEYBOARD)); }
+    if (text === 'Reset Balance') { pendingOp.set(String(chat), 'reset'); return void (await out(chat, 'ऐसे भेजिए: आईडी [रकम]. रकम न दें तो 20000.', KEYBOARD)); }
+    const op = pendingOp.get(String(chat));
+    if (op && !text.startsWith('/')) {
+      pendingOp.delete(String(chat));
+      const [pid, pamt] = text.split(/\s+/);
+      return void (await (op === 'allot' ? doAllot(chat, pid, pamt) : doReset(chat, pid, pamt)));
+    }
+    let cm;
+    if ((cm = /^\/allot(?:@\w+)?\s+(\S+)\s+(\S+)/.exec(text))) return void (await doAllot(chat, cm[1], cm[2]));
+    if (/^\/allot(\s|$)/.test(text)) return void (await out(chat, 'ऐसे लिखिए: /allot आईडी रकम', KEYBOARD));
+    if ((cm = /^\/resetbalance(?:@\w+)?\s+(\S+)(?:\s+(\S+))?/.exec(text))) return void (await doReset(chat, cm[1], cm[2]));
+    if (/^\/resetbalance(\s|$)/.test(text)) return void (await out(chat, 'ऐसे लिखिए: /resetbalance आईडी [रकम]', KEYBOARD));
+    if ((cm = /^\/balance(?:@\w+)?\s+(\S+)/.exec(text))) {
+      const id = await toId(cm[1]);
+      const b = auth.isOurId(id) ? await store.getBalance(id) : null;
+      return void (await out(chat, b === null ? 'ऐसा कोई खाता नहीं मिला.' : `बैलेंस: ${b}`));
+    }
+
+    if (/^\/help(\s|$)/.test(text)) return void (await out(chat, HELP, KEYBOARD));
+    if (/^\/menu(\s|$)/.test(text)) return void (await out(chat, 'नीचे बटन दबाइए:', MENU_BUTTONS));
+
+    if (/^\/stats(\s|$)/.test(text)) {
+      const s = hub.summary();
+      const users = await store.countUsers();
+      const notifs = (await store.listNotifications()).length;
+      return void (await out(chat,
+        `अभी ऑनलाइन खिलाड़ी: ${s.online}\nखुले कमरे: ${s.openPublic}, कोड वाले कमरे: ${s.openPrivate}\n` +
+        `चल रहे मैच: ${s.playing}\nइंतज़ार में खिलाड़ी: ${s.waiting}\nकुल खाते: ${users}\nसूचनाएँ: ${notifs}`));
+    }
+
+    if (/^\/notify(\s|$)/.test(text)) {
+      const body = text.slice(7).trim();
+      if (body.length < 2) return void (await out(chat, 'ऐसे लिखिए: /notify आपका संदेश'));
+      if (body.length > 500) return void (await out(chat, 'सूचना 500 अक्षर से छोटी रखिए.'));
+      await store.addNotification(body);
+      return void (await out(chat, 'सूचना भेज दी गई. ऐप खुलते ही खिलाड़ियों को दिखेगी.'));
+    }
+
+    if (/^\/notifs(\s|$)/.test(text)) {
+      const list = (await store.listNotifications(5));
+      if (!list.length) return void (await out(chat, 'कोई सूचना नहीं है.'));
+      return void (await out(chat, list.map((n, i) => `${i + 1}. ${n.text}`).join('\n')));
+    }
+
+    if (/^\/clearnotifs(\s|$)/.test(text)) {
+      return void (await out(chat, 'क्या सारी सूचनाएँ मिटानी हैं? यह वापस नहीं आएँगी.', {
+        reply_markup: { inline_keyboard: [[{ text: 'हाँ, सब मिटाओ', callback_data: 'clear_yes' }, { text: 'नहीं, रहने दो', callback_data: 'clear_no' }]] },
+      }));
+    }
+
+    const nu = /^\/notifyuser\s+(\S+)\s+([\s\S]{2,300})$/.exec(text);
+    if (nu) {
+      const uid = await toId(nu[1]);
+      const ok = auth.isOurId(uid) && (await store.pushInbox(uid, nu[2].trim()));
+      return void (await out(chat, ok ? 'खिलाड़ी को निजी सूचना भेज दी गई. ऐप खुलते ही दिखेगी.' : 'ऐसा कोई खाता नहीं मिला.'));
+    }
+
+    const ban = /^\/(ban|unban|suspend|unsuspend)\s+(\S+)/.exec(text);
+    if (ban) {
+      const id = await toId(ban[2]);
+      if (!auth.isOurId(id)) return void (await out(chat, 'यह आईडी या यूज़रनेम नहीं मिला.'));
+      const rec = await store.getUser(id);
+      if (!rec) return void (await out(chat, 'ऐसा कोई खाता नहीं मिला.'));
+      const on = ban[1] === 'ban' || ban[1] === 'suspend';
+      await ctl.setBanned(id, on);
+      return void (await out(chat, on ? `${rec.name} को रोक दिया गया.` : `${rec.name} को वापस खोल दिया गया.`));
+    }
+
+    // कस्टम रूट (कितना भी बड़ा): सादा टेक्स्ट में
+    if (/^\/routeadd\s/i.test(text) || /^ROUTE:/m.test(text) && /^\/routeadd/i.test(text)) {
+      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean).slice(1);
+      const get = (k) => { const l = lines.find((x) => x.toUpperCase().startsWith(k + ':')); return l ? l.slice(k.length + 1).trim() : ''; };
+      const name = get('ROUTE'), from = get('FROM'), to = get('TO'), price = Number(get('PRICE'));
+      const cnt = Number(get('STATIONS'));
+      const stLines = lines.filter((x) => /,\s*-?\d+(\.\d+)?\s*$/.test(x) && !/^(ROUTE|FROM|TO|STATIONS|TRAINS|PRICE):/i.test(x));
+      const stations = stLines.map((x) => { const i = x.lastIndexOf(','); return { name: x.slice(0, i).trim(), km: Number(x.slice(i + 1).trim()) }; });
+      if (!name || !from || !to) return void (await out(chat, 'रूट में ROUTE, FROM और TO लिखना ज़रूरी है.'));
+      if (stations.length < 2) return void (await out(chat, 'कम से कम 2 स्टेशन चाहिए.'));
+      if (cnt !== stations.length) return void (await out(chat, `STATIONS ${cnt} लिखा है, पर ${stations.length} स्टेशन मिले.`));
+      for (let i = 1; i < stations.length; i++) if (!(stations[i].km >= stations[i - 1].km)) return void (await out(chat, `दूरी घट रही है: ${stations[i].name}. सही क्रम में लिखिए.`));
+      if (!(price >= 1 && price <= 100000)) return void (await out(chat, 'PRICE 1 से 100000 के बीच होना चाहिए.'));
+      const routes = JSON.parse((await store.getSetting('routes')) || '{}');
+      let n = 1; while (routes[`route_${n}`]) n++;
+      const id = `route_${n}`;
+      const trains = (lines.find((x) => x.toUpperCase().startsWith('TRAINS:')) || '').slice(7).trim();
+      routes[id] = { name, from, to, price, active: true, trains, stations };
+      await store.setSetting('routes', JSON.stringify(routes));
+      const total = stations[stations.length - 1].km;
+      return void (await out(chat, `रूट ${id} जुड़ गया: ${name}, ${stations.length} स्टेशन, ${total} किमी, कीमत ${price} गेम रुपये. चालू है.`));
+    }
+    if (/^\/routes\s*$/i.test(text)) {
+      const routes = JSON.parse((await store.getSetting('routes')) || '{}');
+      const rows = Object.entries(routes).map(([id, r]) => `${id}: ${r.name}, ${r.price} गेम रुपये, ${r.active ? 'चालू' : 'बंद'}, ${r.stations.length} स्टेशन`);
+      return void (await out(chat, rows.length ? rows.join('\n') : 'अभी कोई रूट नहीं है.'));
+    }
+    const rpc = /^\/routeprice\s+(route_\d+)\s+(\d{1,6})\s*$/i.exec(text);
+    if (rpc) {
+      const routes = JSON.parse((await store.getSetting('routes')) || '{}');
+      if (!routes[rpc[1]]) return void (await out(chat, 'ऐसा रूट नहीं मिला.'));
+      routes[rpc[1]].price = Number(rpc[2]); await store.setSetting('routes', JSON.stringify(routes));
+      return void (await out(chat, `${rpc[1]} की कीमत ${rpc[2]} गेम रुपये.`));
+    }
+    const ron = /^\/route(on|off)\s+(route_\d+)\s*$/i.exec(text);
+    if (ron) {
+      const routes = JSON.parse((await store.getSetting('routes')) || '{}');
+      if (!routes[ron[2]]) return void (await out(chat, 'ऐसा रूट नहीं मिला.'));
+      routes[ron[2]].active = ron[1].toLowerCase() === 'on'; await store.setSetting('routes', JSON.stringify(routes));
+      return void (await out(chat, `${ron[2]} ${routes[ron[2]].active ? 'चालू' : 'बंद'} हुआ.`));
+    }
+
+    // दुकान चालू/बंद, कीमत, प्रोमो कोड (सिर्फ़ एडमिन)
+    const shopCmd = /^\/shop\s+(on|off|status)\s*$/i.exec(text);
+    if (shopCmd) {
+      if (shopCmd[1].toLowerCase() !== 'status') await store.setSetting('shopOpen', shopCmd[1].toLowerCase() === 'on' ? '1' : '0');
+      const open = (await store.getSetting('shopOpen')) === '1';
+      return void (await out(chat, `दुकान अभी ${open ? 'खुली है' : 'बंद है'}.`));
+    }
+    const convCmd = /^\/convert\s+(on|off|status)\s*$/i.exec(text);
+    if (convCmd) {
+      if (convCmd[1].toLowerCase() !== 'status') await store.setSetting('convertOn', convCmd[1].toLowerCase() === 'on' ? '1' : '0');
+      const on = (await store.getSetting('convertOn')) === '1';
+      const rate = Number(await store.getSetting('coinRate')) || 5;
+      return void (await out(chat, `सिक्का बदलना ${on ? 'चालू है' : 'बंद है'}. दर: 1 सिक्का = ${rate} गेम रुपये.`));
+    }
+    const rateCmd = /^\/rate\s+(\d{1,3})\s*$/.exec(text);
+    if (rateCmd) {
+      const r = Number(rateCmd[1]);
+      if (r < 1 || r > 100) return void (await out(chat, 'दर 1 से 100 के बीच रखिए.'));
+      await store.setSetting('coinRate', String(r));
+      return void (await out(chat, `दर तय: 1 सिक्का = ${r} गेम रुपये.`));
+    }
+    const priceCmd = /^\/price\s+(\S+)\s+(\d{1,6})\s*$/.exec(text);
+    if (priceCmd) {
+      const prices = JSON.parse((await store.getSetting('prices')) || '{}');
+      prices[priceCmd[1]] = Number(priceCmd[2]);
+      await store.setSetting('prices', JSON.stringify(prices));
+      return void (await out(chat, `${priceCmd[1]} की कीमत ${priceCmd[2]} गेम रुपये तय हुई.`));
+    }
+    const promoCmd = /^\/promo\s+([A-Za-z0-9_-]{3,20})\s+(\d{1,6})\s*$/.exec(text);
+    if (promoCmd) {
+      const amount = Number(promoCmd[2]);
+      if (amount < 1 || amount > 100000) return void (await out(chat, 'रकम 1 से 100000 के बीच होनी चाहिए.'));
+      const promos = JSON.parse((await store.getSetting('promos')) || '{}');
+      promos[promoCmd[1].toUpperCase()] = amount;
+      await store.setSetting('promos', JSON.stringify(promos));
+      return void (await out(chat, `प्रोमो कोड ${promoCmd[1].toUpperCase()} बना: ${amount} गेम रुपये. एक खिलाड़ी एक बार ही इस्तेमाल कर सकता है.`));
+    }
+    const promoOff = /^\/promooff\s+(\S+)\s*$/.exec(text);
+    if (promoOff) {
+      const promos = JSON.parse((await store.getSetting('promos')) || '{}');
+      delete promos[promoOff[1].toUpperCase()];
+      await store.setSetting('promos', JSON.stringify(promos));
+      return void (await out(chat, `प्रोमो कोड ${promoOff[1].toUpperCase()} बंद.`));
+    }
+
+    if (/^\/release(\s|$)/.test(text)) {
+      adminId = null;
+      await store.setSetting('adminChatId', null);
+      return void (await out(chat, 'ताला खुल गया. नया एडमिन बनने के लिए /start भेजकर पासवर्ड भेजना होगा.'));
+    }
+
+    await out(chat, 'यह आदेश समझ नहीं आया. /help भेजिए.');
+  }
+
+  async function handleCallback(cb) {
+    const admin = await getAdmin();
+    const chat = cb.message && cb.message.chat && cb.message.chat.id;
+    if (!admin || String(admin) !== String(chat)) return;
+    const cc = /^c_(ok|no):(\w+)$/.exec(cb.data || '');
+    if (cc) {
+      const id = cc[2];
+      const rec = await store.getUser(id);
+      if (!rec) { await out(chat, 'यह खाता अब मौजूद नहीं है.'); return; }
+      const ok = cc[1] === 'ok';
+      await store.updateUser(id, { consent: ok ? 'approved' : 'none' });
+      if (ctl && typeof ctl.onConsent === 'function') ctl.onConsent(id, ok ? 'approved' : 'none');
+      await store.pushInbox(id, ok ? 'अभिभावक की सहमति मंज़ूर हो गई. आप खेल सकते हैं.' : 'अभिभावक की सहमति नामंज़ूर हुई. कृपया साफ़ आवाज़ में दोबारा रिकॉर्ड करके भेजिए.');
+      await out(chat, ok ? `${rec.name} की सहमति मंज़ूर की गई.` : `${rec.name} की सहमति नामंज़ूर की गई, उन्हें सूचना भेज दी.`);
+      return;
+    }
+    if (MENU_CMDS[cb.data]) {
+      await handleUpdate({ message: { chat: { id: chat }, text: MENU_CMDS[cb.data], message_id: 0 } });
+      return;
+    }
+    if (cb.data === 'clear_yes') {
+      const n = await store.clearNotifications();
+      await out(chat, `${n} सूचनाएँ मिटा दी गईं.`);
+    } else if (cb.data === 'clear_no') {
+      await out(chat, 'ठीक है, कुछ नहीं मिटाया.');
+    }
+  }
+
+  return { handleUpdate, notifyAdmin, secret: secretFor(token), claimCode, sendTo, forwardFile, toId };
+}
+
+async function botUsername(token) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  if (!res.ok) return null;
+  const j = await res.json();
+  return j && j.result && j.result.username ? j.result.username : null;
+}
+
+async function setupWebhook(token, publicUrl) {
+  const secret = secretFor(token);
+  const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: `${publicUrl.replace(/\/$/, '')}/tg/${secret}`, secret_token: secret, allowed_updates: ['message', 'callback_query'] }),
+  });
+  return res.ok;
+}
+
+module.exports = { createAdmin, setupWebhook, secretFor, botUsername };
